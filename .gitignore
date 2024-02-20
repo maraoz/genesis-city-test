@@ -1,0 +1,10 @@
+full
+raw
+raw-night
+raw-5x5
+log.out
+*.swp
+*.swo
+.env/
+env/
+coords.txt
