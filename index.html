@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Genesis City Map</title>
+    <meta name="description" content="A top-down view map of Decentraland’s world">
+
+    <link rel="shortcut icon" type="image/png" href="/img/favicon.png">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v7.3.0/ol.css">
+    <link rel="stylesheet" href="./css/global.css" type="text/css">
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta property="og:title" content="Genesis City Map" />
+    <meta property="og:description" content="A top-down view map of Decentraland’s world" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://genesis.city" />
+    <meta property="og:image" content="https://genesis.city/img/cover.jpg" />
+
+    <meta name="twitter:title" content="Genesis City: An unofficial map of Decentraland" />
+    <meta name="twitter:description" content="A top-down view map of Decentraland’s world" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://genesis.city/img/cover.jpg" />
+
+    <script src="https://cdn.jsdelivr.net/npm/ol@v7.3.0/dist/ol.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script type="text/javascript">
+      var zoom = 6;
+      var side = 200
+      var n = 5;
+      var tiles = 61;
+      var extent = [0, 0, side*tiles, side*tiles];
+      var dclExtent = [-150-n/2, -150-n/2, 150+n/2, 150+n/2];
+      var origin = [side*0, side * tiles];
+      const maxCoords = 152;
+      let lastParcelPointer;
+      var POItoolTipOverlay;
+      let POIpermalinkPopupExists;
+      let mapSource;
+      // Estates colors
+      const ownedColor = 'rgba(0, 255, 255, 1)';
+      const plazaColor = 'rgba(0, 255, 0, 1)';
+      const roadColor = 'rgba(255, 255, 0, 1)';
+      const districtColor = 'rgba(50, 55, 205, 1)';
+      const ownedColorTranslucid = 'rgba(0, 255, 255, 0.4)';
+      const plazaColorTranslucid = 'rgba(0, 255, 0, 0.4)';
+      const roadColorTranslucid = 'rgba(255, 255, 0, 0.4)';
+      const districtColorTranslucid = 'rgba(50, 55, 205, 0.4)';
+
+      //Recent changes layer
+      const vectorLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({
+          url: 'geo.json',
+          format: new ol.format.GeoJSON(),
+        }),
+        style: function (feature) {
+            return new ol.style.Style({
+              fill : new ol.style.Fill({color: 'rgba(255, 60, 10, 0.5)'}),
+              stroke: new ol.style.Stroke({color: 'rgba(255, 60, 10, 0.05)', width: 1}),
+            })
+        },
+      });
+
+      //Estates layer
+      /* There are actually two estates layers:
+      'estatesLayer' includes only estates perimeter features. Its only present if estatesLayer toggle is in the activated position. (Improves performance when layer is not activated)
+      'estatesAreaLayer' includes estates area features. Its always active no matter in which position is the estatesLayer toggle. (This allows to retrieve estate name data to show on modal even if estatesLayer toggle is not active)*/
+      const estatesLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({
+          url: 'estatesPerimeter.json',
+          format: new ol.format.GeoJSON(),
+        }),
+        style: function (feature) {
+          const assignedColor = assignColor(feature.values_.type, false);
+          return new ol.style.Style({
+            stroke: new ol.style.Stroke({color: assignedColor, width: 2})
+          })
+        },
+      });
+
+      const estatesAreaLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({
+          url: 'estatesArea.json',
+          format: new ol.format.GeoJSON(),
+        }),
+        style: function (feature) {
+          return new ol.style.Style({
+            fill : new ol.style.Fill({color: 'rgba(255, 255, 255, 0)'}),
+          })
+        },
+      });
+
+      //Points Of Interest layer
+      const poiLayer = new ol.layer.Vector({
+          source: new ol.source.Vector(),
+          style: new ol.style.Style({
+              image: new ol.style.Icon({
+              anchor: [0.5, 0.5],
+              src: './img/marker.svg',
+              })
+          })
+      });
+
+      // Parcel pointer layer
+      const parcelPointerLayer = new ol.layer.Vector({
+        source: new ol.source.Vector(),
+        style: new ol.style.Style({
+          image: new ol.style.Icon({
+            anchor: [0.5, 1],
+            src: './img/parcelPointer.svg',
+          }),
+        }),
+      });
+
+      //Lands for sale/rent layer
+      /* This layer contains areas of parcels that are available for sale and/or rent, along with associated metadata. The saleRentLayer is always present on the map but remains invisible. This design allows for the retrieval of sale/rent metadata to display in a modal, even if the 'Lands for Sale' or 'Lands for Rent' toggle is inactive. When either the 'Lands for Sale' or 'Lands for Rent' toggle is activated, the respective parcels are then visually highlighted to become visible on the map.
+      */
+      const saleRentLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({
+          url: 'saleRent.json',
+          format: new ol.format.GeoJSON(),
+        }),
+        style: function (feature) {
+            return new ol.style.Style({
+              fill : new ol.style.Fill({color: 'rgba(255,255,255,0)'}),
+              stroke: new ol.style.Stroke({color: 'rgba(255,255,255,0)', width: 1}),
+            })
+        },
+      });
+
+      function map_range (value, in_min, in_max, out_min, out_max) {
+        return (value+side/n/2 - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+      } 
+
+      function initialize() {
+        const scope = document.querySelector("body");
+        showNightModeLayer = false;
+        showEstatesLayer = false;
+        showUpdatedLayer = false;
+        showPoiLayer = false;
+        showSaleParcels = false;
+        showRentParcels = false;
+        let zoomLevel;
+        vectorLayer.setVisible(showUpdatedLayer);
+        estatesLayer.setVisible(showEstatesLayer);
+        estatesAreaLayer.setVisible(true);
+        poiLayer.setVisible(showPoiLayer);
+        saleRentLayer.setVisible(true);
+        var projection = new ol.proj.Projection({
+          code: 'decentraland-images',
+          units: 'pixels',
+          extent: extent,
+        });
+        var resolutions = [];
+        var viewResolutions = [];
+
+        const defaultView = {
+          projection: projection,
+          center: ol.extent.getCenter(extent),
+          resolutions: viewResolutions,
+          zoom: 3,
+          minZoom: 1,
+        }
+
+        for (var i = 0; i <= zoom; ++i) {
+          resolutions.push(Math.pow(2, zoom-i));
+        }
+        for (var i = 1; i <= 9; ++i) {
+          viewResolutions.push(side/Math.pow(2, 1+i))
+        }
+
+        mapSource = new ol.source.TileImage({
+          url: 'map/latest/{z}/{x},{y}.jpg',
+          wrapX: false,
+          tileGrid: new ol.tilegrid.TileGrid({
+            extent: extent,
+            origin: origin,
+            tileSize: [side, side],
+            resolutions: resolutions,
+            minZoom: 1,
+            maxZoom: 10
+          }),
+        })
+
+        var map = new ol.Map({
+          target: 'map',
+          layers: [
+            new ol.layer.Tile({
+              source: mapSource,
+            }),
+            vectorLayer,
+            estatesLayer,
+            estatesAreaLayer,
+            saleRentLayer,
+          ],
+          view: new ol.View(setView()),
+        });
+        map.on('pointermove', function(event) {
+          let x = (map_range(event.coordinate[0], extent[0], extent[2], dclExtent[0], dclExtent[2]));
+          let y = (map_range(event.coordinate[1], extent[1], extent[3], dclExtent[1], dclExtent[3]));
+          let xf = 1 * Math.floor((x));
+          let yf = 1 * Math.floor((y));
+          document.getElementById('coords').innerHTML = `<span>(${xf}, ${yf})</span>`
+
+        });
+
+        // Fill estate area & increase estate perimeter width on hover
+        let hoverEstateArea = null;
+        let hoverEstatePerimeter = null;
+        map.on('pointermove', function(event) {
+          if (showEstatesLayer) {
+            if (hoverEstateArea !== null) {
+              hoverEstateArea.setStyle(undefined);
+              hoverEstateArea = null;
+              hoverEstatePerimeter.setStyle(undefined);
+              hoverEstatePerimeter = null;
+            }
+            if (map.hasFeatureAtPixel(event.pixel)) {
+              map.forEachFeatureAtPixel(event.pixel, (feature) => {
+                const assignedColorArea = assignColor(feature.values_.type, true);
+                const assignedColorPerimeter = assignColor(feature.values_.type, false);
+                const hoverStyleArea = new ol.style.Style({
+                  fill : new ol.style.Fill({color: assignedColorArea}),
+                  // stroke: new ol.style.Stroke({color: assignedColor, width: 1}),
+                });
+                const hoverStylePerimeter = new ol.style.Style({
+                  stroke: new ol.style.Stroke({color: assignedColorPerimeter, width: 4}),
+                });
+                if (feature.values_.featureType === 'estateArea') {
+                  const estateId = parseInt(feature.values_.estateId);
+                  const perimeterFeature = estatesLayer.getSource().getFeatureById(estateId);
+                  hoverEstateArea = feature;
+                  hoverEstatePerimeter = perimeterFeature;
+                  feature.setStyle(hoverStyleArea);
+                  perimeterFeature.setStyle(hoverStylePerimeter)
+                  return true;
+                }
+              });
+            }
+          }
+          // Clean styles and features when mouseover an overlay. (Overlays: Layer/zoom controls, social links, last updated date)
+          var mapElemet = document.getElementById("map");
+          mapElemet.addEventListener("mouseout", function() {
+            if (hoverEstateArea) {
+              hoverEstateArea.setStyle(undefined);
+              hoverEstatePerimeter.setStyle(undefined);
+              hoverEstateArea = null;
+              hoverEstatePerimeter = null;
+            }
+          });
+        })
+
+        //Show zoom and coords as hash URL in address bar
+        map.on('moveend', function(event) {
+          zoomLevel = map.getView().getZoom();
+          const zoom = Math.round(zoomLevel);
+          const OLcenter = map.getView().getCenter();
+          const decentralandCenter = mapToDecentralandCoords(OLcenter);
+          const lon = Math.round(decentralandCenter[0]);
+          const lat = Math.round(decentralandCenter[1]);
+          const layersStatus = `,n${showNightModeLayer === true ? '1' : '0'},e${showEstatesLayer === true ? '1' : '0'},c${showUpdatedLayer === true ? '1' : '0'},p${showPoiLayer === true ? '1' : '0'},s${showSaleParcels === true ? '1' : '0'},r${showRentParcels === true ? '1' : '0'}`
+          window.location.hash = `${lon},${lat},${zoom}z${layersStatus}`;
+          if(window.innerWidth > 630) {
+            hidePermalinkPopup();
+          }
+          contextMenu.classList.remove("visible");
+        });
+
+        //Show share link of parcel at click
+        let saleRentFeatureData;
+        let banner = "";
+        let bannerUrl = 'url("' + banner + '")';
+        map.on('singleclick', function(event) {
+          saleRentFeatureData = undefined;
+          // const zoom = Math.round(map.getView().getZoom());
+          let x = (map_range(event.coordinate[0], extent[0], extent[2], dclExtent[0], dclExtent[2]));
+          let y = (map_range(event.coordinate[1], extent[1], extent[3], dclExtent[1], dclExtent[3]));
+          let xf = 1 * Math.floor((x));
+          let yf = 1 * Math.floor((y));
+
+          // Using Netlify redirects to avoid CORS, check _redirects file
+          const metaDataBaseURL = `${window.location.origin}/api/`
+          // For local testing use the following metaDataBaseURL:
+          // const metaDataBaseURL = `https://places.decentraland.org/api/`
+          const metaDataEndpoint = metaDataBaseURL.concat(`places?&positions=${xf}%2C${yf}`);
+
+          // Fetch and show image for modal thumbnail for clicked parcel
+          fetch(metaDataEndpoint).then(res => res.json()).then(data => {
+              const defaultImage = 'https://peer.decentraland.org/content/contents/bafkreidj26s7aenyxfthfdibnqonzqm5ptc4iamml744gmcyuokewkr76y';
+              data.data[0]?.image ? bannerUrl = 'url("' + data.data[0].image + '")' : bannerUrl = `url(${defaultImage})`;
+              
+              bannerContainer.style.backgroundImage = bannerUrl;
+            }
+          );
+          // Check click within map limits
+          if (Math.abs(xf) <= 150 && Math.abs(yf) <= 150) {
+            removeLastPointer();
+            POItoolTipOverlay.setPosition(undefined);
+            // get Estate name if exists
+            let clickedEstateName;
+            const features = map.getFeaturesAtPixel(event.pixel);
+            features.forEach(feat => {
+              if (feat?.values_.featureType === 'estateArea') {
+                clickedEstateName = feat?.values_.name
+              }
+              // get saleRent feature if exists
+              if(feat?.values_.featureType === 'saleRent') {
+                saleRentFeatureData = {
+                  category: feat.values_.category,
+                  name: feat.values_.name,
+                  salePrice: feat.values_.salePrice,
+                  rentPrice: feat.values_.rentPrice,
+                  size: feat.values_.size,
+                  parcels: feat.values_.parcels,
+                  contractAddress: feat.values_.contractAddress,
+                  tokenId: feat.values_.tokenId,
+                }
+              }
+            })
+            // POI exists at clicked pixel
+            const feature = map.forEachFeatureAtPixel(event.pixel, (feature) => feature);
+            if (map.hasFeatureAtPixel(event.pixel) && feature?.values_.featureType === 'poi') {
+              // When click on POI icon
+              // Add pointer at clicked parcel
+              const coordinates = feature.values_.geometry.flatCoordinates;
+              // get Estate name if exists
+              const estateFeatures = estatesLayer.getSource().getFeaturesAtCoordinate(coordinates);
+              estateFeatures.forEach(feat => {
+                if (feat?.values_.featureType === 'estateArea') {
+                  clickedEstateName = feat?.values_.name
+                }
+              })
+              // Generate parcel permalink popup
+              const DCLcoords = mapToDecentralandCoords(coordinates)
+              const lon = DCLcoords[0];
+              const lat = DCLcoords[1];
+              saleRentFeatureData = undefined;
+              createPermalinkPopup(lon, lat, 'poi', saleRentFeatureData);
+              showPermalinkPopup();
+              POIpermalinkPopupExists = true;
+              // Maintain POI Tool Tip visible on click
+              toolTipcontent.innerHTML = `<b>${feature.values_.name}</b>`;
+              POItoolTipOverlay.setPosition(coordinates);
+            } else {
+              POIpermalinkPopupExists = false;
+              // Add pointer at clicked parcel
+              showParcelPointer(decentralandToMapCoords(xf, yf));
+              createPermalinkPopup(xf, yf, 'parcel', saleRentFeatureData, clickedEstateName);
+              showPermalinkPopup();
+            }
+          }
+        });
+
+        //Add Points Of Interest Layer
+        map.addLayer(poiLayer);
+        //Add Points Of Interest Markers
+        addPoiMarkers();
+
+        // Add Parcel Pointer Marker Layer
+        map.addLayer(parcelPointerLayer);
+
+        // Create POI Tool Tip
+        var container = document.getElementById('toolTip');
+        var toolTipcontent = document.getElementById('toolTip-content');
+
+        POItoolTipOverlay = new ol.Overlay({
+          element: container,
+          autoPan: true,
+          autoPanAnimation: {
+              duration: 250
+          }
+        });
+        map.addOverlay(POItoolTipOverlay);
+
+        if(window.innerWidth > 630) {
+          //Lauch POI tool tip at hover
+          map.on('pointermove', function (event) {
+            showPOItoolTip(event);
+            // Update permalink popup infomration
+            if (POIpermalinkPopupExists) {
+              const feature = map.forEachFeatureAtPixel(event.pixel, (feature) => feature);
+              let clickedEstateName;
+              if (map.hasFeatureAtPixel(event.pixel) && feature?.values_.featureType === 'poi') {
+                const coordinates = feature.values_.geometry.flatCoordinates;
+                // get Estate name if exists
+                const estateFeatures = estatesLayer.getSource().getFeaturesAtCoordinate(coordinates);
+                estateFeatures.forEach(feat => {
+                  if (feat?.values_.featureType === 'estateArea') {
+                    clickedEstateName = feat?.values_.name
+                  }
+                })
+                // Generate POI permalink popup
+                const DCLcoords = mapToDecentralandCoords(coordinates)
+                const lon = DCLcoords[0];
+                const lat = DCLcoords[1];
+                saleRentFeatureData = undefined;
+                createPermalinkPopup(lon, lat, 'poi', saleRentFeatureData, clickedEstateName);
+              }
+            } 
+          });
+        } else {
+          //Lauch POI tool tip at click
+          map.on('singleclick', function (event) {
+            showPOItoolTip(event);
+          });
+        }
+
+        function showPOItoolTip(event) {
+          const feature = map.forEachFeatureAtPixel(event.pixel, (feature) => feature);
+          if (map.hasFeatureAtPixel(event.pixel) && feature?.values_.featureType === 'poi') {
+            const coordinate = feature.values_.geometry.flatCoordinates;
+            toolTipcontent.innerHTML = `<b>${feature.values_.name}</b>`;
+            POItoolTipOverlay.setPosition(coordinate);
+          } else {
+            !POIpermalinkPopupExists && POItoolTipOverlay.setPosition(undefined);
+          }
+        }
+        
+        //Set default or current view based on URL Hash
+        function setView() {
+          if (urlHashFirstValidation(window.location.hash)) {
+            let currentViewLon = parseInt(window.location.href.split('#')[1].split('z')[0].split(',')[0]);
+            let currentViewLat = parseInt(window.location.href.split('#')[1].split('z')[0].split(',')[1]);
+            let currentViewZoom = window.location.href.split('#')[1].split('z')[0].split(',')[2];
+            if (urlHashSecondValidation(window.location.hash)) {
+              let nightModeLayerStatus = window.location.href.split('#')[1].split(',')[3].split('n')[1];
+              let estatesLayerStatus = window.location.href.split('#')[1].split(',')[4].split('e')[1];
+              let recentChangesLayerStatus = window.location.href.split('#')[1].split(',')[5].split('c')[1];
+              let poisLayerStatus = window.location.href.split('#')[1].split(',')[6].split('p')[1];
+              let saleLayerStatus = window.location.href.split('#')[1].split(',')[7].split('s')[1];
+              let rentLayerStatus = window.location.href.split('#')[1].split(',')[8].split('r')[1];
+              //Apply Layers Status from address bar
+              if (nightModeLayerStatus === '1') {
+                toggleNightMode();
+                activateLayerToggle('nightMode');
+              }
+              if (estatesLayerStatus === '1') {
+                toggleEstatesLayer();
+                activateLayerToggle('estates');
+              }
+              if (recentChangesLayerStatus === '1') {
+                toggleUpdatedLayer();
+                activateLayerToggle('recentChanges');
+              }
+              if (poisLayerStatus === '1') {
+                togglePointsOfInterest();
+                activateLayerToggle('pois');
+              }
+              if (saleLayerStatus === '1') {
+                toggleSaleLayer();
+                activateLayerToggle('sale');
+              }
+              if (rentLayerStatus === '1') {
+                toggleRentLayer();
+                activateLayerToggle('rent');
+              }
+            }
+            if (currentViewZoom < 1) {
+              currentViewZoom = 1
+            } else if (currentViewZoom > 8) {
+              currentViewZoom = 8
+            }
+            let currentViewPosition = decentralandToMapCoords(currentViewLon, currentViewLat);
+
+            const currentView = {
+              projection: projection,
+              center: currentViewPosition,
+              resolutions: viewResolutions,
+              zoom: currentViewZoom,
+              minZoom: 1,
+            }
+
+            return currentView
+          } else {
+            return defaultView
+          }
+        }
+      }
+
+      function toggleUpdatedLayer() {
+        showUpdatedLayer = !showUpdatedLayer;
+        vectorLayer.setVisible(showUpdatedLayer);
+        showUpdatedLayer ? activeLocationHash('changes', true) : activeLocationHash('changes', false);
+      }
+      
+      function toggleSaleLayer() {
+        if (showRentParcels) {
+          toggleRentLayer();
+          rentLayerToggle.checked = false;
+        }
+
+        const activatedStyle = function (feature) {
+          const salePrice = feature.values_.salePrice
+          const isForSale = salePrice !== null;
+          
+          const fillColor = isForSale ? '#ffd500' : 'rgba(255,255,255,0)';
+          const strokeColor = isForSale ? '#ffd500' : 'rgba(255,255,255,0)';
+          
+          return new ol.style.Style({
+            fill: new ol.style.Fill({ color: fillColor }),
+            stroke: new ol.style.Stroke({ color: strokeColor, width: 1 }),
+          });
+        };
+        
+        const deactivatedStyle = new ol.style.Style({
+          fill : new ol.style.Fill({color: 'rgba(255,255,255,0)'}),
+          stroke: new ol.style.Stroke({color: 'rgba(255,255,255,0)', width: 1}),
+        });
+
+        showSaleParcels = !showSaleParcels;
+        showSaleParcels ? saleRentLayer.setStyle(activatedStyle) : saleRentLayer.setStyle(deactivatedStyle);
+        showSaleParcels ? activeLocationHash('sale', true) : activeLocationHash('sale', false);
+      }
+
+      function toggleRentLayer() {
+        if (showSaleParcels) {
+          toggleSaleLayer();
+          saleLayerToggle.checked = false;
+        }
+
+        const activatedStyle = function (feature) {
+          const rentPrice = feature.values_.rentPrice
+          const isForRent = rentPrice !== null;
+          
+          const fillColor = isForRent ? '#00d3ff' : 'rgba(255,255,255,0)';
+          const strokeColor = isForRent ? '#00d3ff' : 'rgba(255,255,255,0)';
+          
+          return new ol.style.Style({
+            fill: new ol.style.Fill({ color: fillColor }),
+            stroke: new ol.style.Stroke({ color: strokeColor, width: 1 }),
+          });
+        };
+
+        const deactivatedStyle = new ol.style.Style({
+          fill : new ol.style.Fill({color: 'rgba(255,255,255,0)'}),
+          stroke: new ol.style.Stroke({color: 'rgba(255,255,255,0)', width: 1}),
+        });
+        
+        showRentParcels = !showRentParcels;
+        showRentParcels ? saleRentLayer.setStyle(activatedStyle) : saleRentLayer.setStyle(deactivatedStyle);
+        showRentParcels ? activeLocationHash('rent', true) : activeLocationHash('rent', false);
+      }
+
+      let estatesIdSeted = false;
+      function toggleEstatesLayer() {
+        showEstatesLayer = !showEstatesLayer;
+        estatesLayer.setVisible(showEstatesLayer);
+        if (!estatesIdSeted) {
+          const estatesSource = estatesLayer.getSource()
+          estatesSource.once('change', () => {
+            const allFeatures = estatesSource.getFeatures();
+            allFeatures.forEach(feature => {
+              if (feature.values_.featureType === 'estatePerimeter') {
+                feature.setId(parseInt(feature.values_.estateId));
+              }
+            });
+          })
+          estatesIdSeted = true;
+        }
+        showEstatesLayer ? activeLocationHash('estates', true) : activeLocationHash('estates', false);
+      }
+
+      function togglePointsOfInterest() {
+        showPoiLayer = !showPoiLayer;
+        poiLayer.setVisible(showPoiLayer);
+        if (!showPoiLayer && POIpermalinkPopupExists) {
+          POItoolTipOverlay.setPosition(undefined);
+          hidePermalinkPopup();
+        }
+        showPoiLayer ? activeLocationHash('pois', true) : activeLocationHash('pois', false);
+      }
+
+      function addPoiMarkers() {
+        fetch('./pois.json')
+        .then(res => res.json())
+        .then(data => {
+          const POIs = data.data;
+          POIs.forEach(element => {
+            const lat = element.lat;
+            const lon = element.lon;
+            var marker = new ol.Feature({
+              geometry: new ol.geom.Point(decentralandToMapCoords(lon, lat)),
+              name: element.name,
+              featureType: 'poi',
+            });
+            poiLayer.getSource().addFeature(marker);
+          })
+        })
+        .catch(err => console.log(err));
+      }
+
+      function mapToDecentralandCoords(mapCoords) {
+        const decX = (mapCoords[0] - 20) / 40 - maxCoords;
+        const decY = (mapCoords[1] - 20) / 40 - maxCoords;
+
+        return [decX, decY];
+      }
+
+      function decentralandToMapCoords(decX, decY) {
+        const mapX = (decX + maxCoords) * 40 + 20;
+        const mapY = (decY + maxCoords) * 40 + 20;
+
+        return [mapX, mapY]
+      }
+
+      function urlHashFirstValidation(hash) {
+        //The regular expression 'regex0' matches a string that starts with a hash character '#', followed by two comma-separated sections of numbers that can be any number between -150 and 150. The third section must be ant number followed with the letter 'z'. 'regex0' also matches that the last five sections are a letter followed by a 1 or a 0.
+        // E.g. '#14,91,7z,n0,e0,r1,p1,s0'
+        const regex0 = /^#-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?\d+z$/;
+        const regex1 = /^#-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?\d+z,n[10],e[10],c[10],p[10],s[10],r[10]$/;
+        return regex0.test(hash) || regex1.test(hash);
+      }
+      function urlHashSecondValidation(hash) {
+        const regex1 = /^#-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?(?:1[0-4][0-9]|[0-9]{1,2}|150)\,-?\d+z,n[10],e[10],c[10],p[10],s[10],r[10]$/;
+        return regex1.test(hash);
+      }
+
+      function showParcelPointer(coords) {
+        var parcelPointer = new ol.Feature({
+          geometry: new ol.geom.Point(coords),
+        });
+        parcelPointerLayer.getSource().addFeature(parcelPointer);
+        lastParcelPointer = parcelPointer;
+      }
+
+      function removeLastPointer() {
+        parcelPointerLayer.getSource().removeFeature(lastParcelPointer);
+      }
+
+      function assignColor(estateType, isTranslucid) {
+        let assignedColor;
+        switch (estateType) {
+          case 'owned': isTranslucid ? assignedColor = ownedColorTranslucid : assignedColor = ownedColor;
+            break;
+          case 'plaza': isTranslucid ? assignedColor = plazaColorTranslucid : assignedColor = plazaColor;
+            break;
+          case 'road': isTranslucid ? assignedColor = roadColorTranslucid : assignedColor = roadColor;
+            break;
+          case 'district': isTranslucid ? assignedColor = districtColorTranslucid : assignedColor = districtColor;
+            break;
+        }
+        return assignedColor;
+      }
+
+      function toggleNightMode() {
+        showNightModeLayer = !showNightModeLayer
+        if (showNightModeLayer) {
+          mapSource.setUrl('map-night/latest/{z}/{x},{y}.jpg');
+          activeLocationHash('nightMode', true);
+        } else {
+          mapSource.setUrl('map/latest/{z}/{x},{y}.jpg');
+          activeLocationHash('nightMode', false);
+        }
+      }
+
+      // Change layer status shown in address bar when activating/deactivating toggle
+      function activeLocationHash(layer, shouldActivate) {
+        const firstLetter = layer.charAt(0);
+        let oldMode;
+        let newMode;
+        if (shouldActivate) {
+          oldMode = `${firstLetter}0`;
+          newMode = `${firstLetter}1`;
+        } else {
+          oldMode = `${firstLetter}1`;
+          newMode = `${firstLetter}0`;
+        }
+        window.location.hash = `${window.location.hash.split(oldMode)[0]}${newMode}${window.location.hash.split(oldMode)[1]}`
+      }
+      
+    </script>
+    <script defer data-domain="genesis.city" src="https://plausible.io/js/plausible.js"></script>
+  </head>
+
+  <body onload="initialize()">
+    <div id="map"></div>
+    <div id="toolTip" class="ol-popup">
+        <div id="toolTip-content"></div>
+    </div>
+
+    <!-- Social links -->
+    <div class="overlay blur" id="social">
+      <a href="https://github.com/genesis-city/genesis.city" target="_blank">
+        <img src="./img/github.svg" alt="GitHub_icon">
+      </a>
+      <a href="https://x.com/GenesisCityMap" target="_blank">
+        <img src="./img/x.svg" alt="X_icon">
+      </a>
+      <a href="https://github.com/genesis-city/genesis.city#api-docs" target="_blank">
+        <img src="./img/API.svg" alt="API_icon">
+      </a>
+      <!-- <a href="https://rarible.com/token/polygon/0x35f8aee672cde8e5fd09c93d2bfe4ff5a9cf0756:79643025524252912328501563119982762407448275703446082421711029927493081497617" target="_blank">
+        <img src="./img/rarible.svg" alt="Rarible">
+      </a> -->
+    </div>
+
+    <!-- Map information and layers controls -->
+    <div class="overlay info" >
+      <div class="blur coords" id="coords">
+      </div>
+      <div class="dropdown">
+        <button onclick="toggleMenu()" class="blur menu"></button>
+        <div class="blur menu-content show" id="updates">
+          <div class="header">
+            <p>Map layers</p>
+            <a onclick="toggleMenu()"></a>
+          </div>
+          <div class="options">
+            <!-- Layer controls -->
+            <label class="layer-control">
+              <span class="label">Night mode</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="toggleNightMode()" id="night-mode-toggle" type="checkbox" name="night-mode-toggle" value="show-night-mode">
+                <label class="toggle-label" for="night-mode-toggle">Toggle</label>
+              </div>
+            </label>
+            <label class="layer-control">
+              <span class="label">Estates</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="toggleEstatesLayer()" id="estates-layer-toggle" type="checkbox" name="estates-layer-toggle" value="show-estates">
+                <label class="toggle-label" for="estates-layer-toggle">Toggle</label>
+              </div>
+            </label>
+            <label class="layer-control">
+              <span class="label">Recent changes</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="toggleUpdatedLayer()" id="updated-layer-toggle" type="checkbox" name="updated-layer-toggle" value="show-updated">
+                <label class="toggle-label" for="updated-layer-toggle">Toggle</label>
+              </div>
+            </label>
+            <label class="layer-control">
+              <span class="label">Points of interest</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="togglePointsOfInterest()" id="poi-layer-toggle" type="checkbox" name="poi-layer-toggle" value="show-poi">
+                <label class="toggle-label" for="poi-layer-toggle">Toggle</label>
+              </div>
+            </label>
+            <label class="layer-control">
+              <span class="label">Lands for sale</span>
+              <span class="new-feat">New</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="toggleSaleLayer()" id="sale-layer-toggle" type="checkbox" name="sale-layer-toggle" value="show-rent/sale">
+                <label class="toggle-label" for="sale-layer-toggle">Toggle</label>
+              </div>
+            </label>
+            <label class="layer-control">
+              <span class="label">Lands for rent</span>
+              <span class="new-feat">New</span>
+              <div class="toggle">
+                <input class="toggle-input" onclick="toggleRentLayer()" id="rent-layer-toggle" type="checkbox" name="rent-layer-toggle" value="show-rent">
+                <label class="toggle-label" for="rent-layer-toggle">Toggle</label>
+              </div>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Last update -->
+    <div class="overlay blur date-dao"  id="date">
+      Last updated  Feb. 4, 2024.
+    </div>
+    <div class="overlay blur date-dao"  id="dao">
+      <a href="https://dao.decentraland.org/" target=”_blank”>
+        <p>Powered by <span>Decentraland</span> · DAO</p>
+      </a>
+    </div>
+
+    <!-- Jump in button -->
+    <div id="context-menu">
+      <div class="item"></div>
+    </div>
+
+    <!-- Parcel link box -->
+    <div class="overlay blur parcel-link-box hide" id="parcel-link-box">
+      <div id="banner-container" class="dg ImgFixed ImgFixed--wide" style="background-color: transparent; background-size: cover; background-position: center center;"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADUlEQVR4AWNwL/ABYwAKHQIHW//QwwAAAABJRU5ErkJggg==" width="290"></div>
+      <img id="spinner" src="./img/spinner.gif" alt="">
+      <div class="link-location">
+        <i id="permalink-icon"></i>
+        <p id="modal-title"></p>
+        <a class="close" onclick="hidePermalinkPopup()">
+          <svg fill="none" height="10" xmlns="http://www.w3.org/2000/svg" viewBox="5 4 10 10">
+            <path d="M6.29871 4.20129C6.15653 4.06881 5.96849 3.99669 5.77419 4.00012C5.57988 4.00355 5.3945 4.08226 5.25709 4.21967C5.11967 4.35708 5.04096 4.54247 5.03753 4.73677C5.0341 4.93107 5.10623 5.11912 5.23871 5.26129L8.95871 8.98129L5.23871 12.7013C5.16502 12.77 5.10592 12.8528 5.06493 12.9448C5.02394 13.0368 5.00189 13.1361 5.00012 13.2368C4.99834 13.3375 5.01686 13.4375 5.05459 13.5309C5.09231 13.6243 5.14845 13.7091 5.21967 13.7803C5.29089 13.8515 5.37572 13.9077 5.46911 13.9454C5.5625 13.9831 5.66253 14.0017 5.76323 13.9999C5.86393 13.9981 5.96325 13.9761 6.05525 13.9351C6.14725 13.8941 6.23005 13.835 6.29871 13.7613L10.0187 10.0413L13.7387 13.7613C13.8074 13.835 13.8902 13.8941 13.9822 13.9351C14.0742 13.9761 14.1735 13.9981 14.2742 13.9999C14.3749 14.0017 14.4749 13.9831 14.5683 13.9454C14.6617 13.9077 14.7465 13.8515 14.8177 13.7803C14.889 13.7091 14.9451 13.6243 14.9828 13.5309C15.0206 13.4375 15.0391 13.3375 15.0373 13.2368C15.0355 13.1361 15.0135 13.0368 14.9725 12.9448C14.9315 12.8528 14.8724 12.77 14.7987 12.7013L11.0787 8.98129L14.7987 5.26129C14.9312 5.11912 15.0033 4.93107 14.9999 4.73677C14.9965 4.54247 14.9177 4.35708 14.7803 4.21967C14.6429 4.08226 14.4575 4.00355 14.2632 4.00012C14.0689 3.99669 13.8809 4.06881 13.7387 4.20129L10.0187 7.92129L6.29871 4.20129Z" fill="white">
+            </path>
+          </svg>
+        </a>
+      </div>
+      <div class="saleRentData">
+        <div>
+          <i class="marketplace-icon"></i>
+          <p id="salePrice"></p>
+        </div>
+        <p id="rentPrice"></p>
+      </div>
+      <div class="shareLinkContainer">
+        <input type="text" id="shareLink" name="shareLink" readonly onclick="select()">
+        <button onclick="copyLink()">Copy Link</button>
+      </div>
+    </div>
+
+    <!-- Copied Link popup-->
+    <div class="overlay blur copied-link-popup hide" id="copied-link-popup">
+      <img src="/img/greenCheck.svg" alt="">
+      <p>Copied to clipboard</p>
+    </div>
+
+    <script>
+      const contextMenu = document.getElementById("context-menu");
+      const scope = document.querySelector("body");
+      const parcelLinkBox = document.getElementById("parcel-link-box");
+      const socialLinks = document.getElementById('social');
+      const updateDate = document.getElementById('date');
+      const daoRecognition = document.getElementById('dao');
+      const permalinkIcon = document.getElementById('permalink-icon');
+      const modalTitle = document.getElementById('modal-title');
+      const nightModeToggle = document.getElementById('night-mode-toggle');
+      const estatesLayerToggle = document.getElementById('estates-layer-toggle');
+      const updatedLayerToggle = document.getElementById('updated-layer-toggle');
+      const poisLayerToggle = document.getElementById('poi-layer-toggle');
+      const saleLayerToggle = document.getElementById('sale-layer-toggle');
+      const rentLayerToggle = document.getElementById('rent-layer-toggle');
+      const bannerContainer = document.getElementById('banner-container');
+
+      const normalizePosition = (mouseX, mouseY) => {
+        // ? compute what is the mouse position relative to the container element (scope)
+        let {
+          left: scopeOffsetX,
+          top: scopeOffsetY,
+        } = scope.getBoundingClientRect();
+
+        scopeOffsetX = scopeOffsetX < 0 ? 0 : scopeOffsetX;
+        scopeOffsetY = scopeOffsetY < 0 ? 0 : scopeOffsetY;
+
+        const scopeX = mouseX - scopeOffsetX;
+        const scopeY = mouseY - scopeOffsetY;
+
+        // ? check if the element will go out of bounds
+        const outOfBoundsOnX =
+          scopeX + contextMenu.clientWidth > scope.clientWidth;
+
+        const outOfBoundsOnY =
+          scopeY + contextMenu.clientHeight > scope.clientHeight;
+
+        let normalizedX = mouseX;
+        let normalizedY = mouseY;
+
+        // ? normalize on X
+        if (outOfBoundsOnX) {
+          normalizedX =
+            scopeOffsetX + scope.clientWidth - contextMenu.clientWidth;
+        }
+
+        // ? normalize on Y
+        if (outOfBoundsOnY) {
+          normalizedY =
+            scopeOffsetY + scope.clientHeight - contextMenu.clientHeight;
+        }
+
+        return { normalizedX, normalizedY };
+      };
+
+      //Context Menu
+      scope.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+
+        const { clientX: mouseX, clientY: mouseY } = event;
+
+        const { normalizedX, normalizedY } = normalizePosition(mouseX, mouseY);
+
+        let coordsString = document.getElementById("coords").innerText.replace(/[()]/g, '').split(/, /g)
+        if (coordsString.length < 2) {
+          return
+        }
+
+        var x = parseInt(coordsString[0])
+        var y = parseInt(coordsString[1])
+        if (x < -maxCoords || x > maxCoords || y < -maxCoords || y > maxCoords) {
+          return
+        }
+
+        const reportParcelOption = document.createElement("a");
+        reportParcelOption.href = "#";
+        reportParcelOption.textContent = `Report (${coordsString[0]}, ${coordsString[1]})`;
+
+        reportParcelOption.addEventListener("click", (event) => {
+          event.preventDefault();
+
+          const reportedParcel = {
+            location: `${coordsString[0]},${coordsString[1]}`,
+            fixed: false,
+          };
+
+          window.reportParcel(reportedParcel);
+        });
+
+        // Add Jump in to option
+        contextMenu.firstElementChild.innerHTML = `
+          <a href="https://play.decentraland.org/?position=${coordsString[0]}%2C${coordsString[1]}" target="_blank">Jump in to (${coordsString[0]}, ${coordsString[1]}) <i class="JumpInIcon"></i></a>
+        `;
+        // Add Report Parcel option
+        contextMenu.firstElementChild.appendChild(reportParcelOption);
+        contextMenu.classList.remove("visible");
+
+        contextMenu.style.top = `${normalizedY}px`;
+        contextMenu.style.left = `${normalizedX}px`;
+
+        setTimeout(() => {
+          contextMenu.classList.add("visible");
+        });
+      });
+
+      scope.addEventListener("click", (e) => {
+        // ? close the menu if the user clicks outside of it
+        // if (e.target.offsetParent != contextMenu) {
+          contextMenu.classList.remove("visible");
+        // }
+      });
+
+
+      // Layers Menu - Toggle between hiding and showing the dropdown content
+      function toggleMenu() {
+        document.getElementById("updates").classList.toggle("show");
+      }
+
+      // Create Parcel Permalink Popup
+      function createPermalinkPopup(lon, lat, type, saleRentFeatureData, clickedEstateName) {
+        if (type === 'parcel') {
+          permalinkIcon.classList.remove('poi');
+          permalinkIcon.classList.add('parcel');
+        }
+        if (type === 'poi') {
+          permalinkIcon.classList.remove('parcel');
+          permalinkIcon.classList.add('poi');
+        }
+        modalTitle.innerHTML = `( ${lon}, ${lat} )`;
+        if (clickedEstateName) {
+          modalTitle.innerHTML = clickedEstateName;
+        }
+        const shareLink = window.location.host.split('#')[0] + '/#' + `${lon},${lat}` + `,7z`;
+        const shareLinkInput = document.getElementById('shareLink');
+        const protocol = window.location.protocol + '//'
+        shareLinkInput.value = protocol + shareLink;
+
+        // Add sale/rent data
+        const salePriceDOM = document.getElementById('salePrice'); 
+        const rentPriceDOM = document.getElementById('rentPrice');
+        const salePrice = (Math.round(saleRentFeatureData?.salePrice)/1000).toFixed(1).replace(/[.,]0$/, "");
+        const rentPrice = Math.round(saleRentFeatureData?.rentPrice);
+        const marketplaceLink = `https://market.decentraland.org/contracts/${saleRentFeatureData?.contractAddress}/tokens/${saleRentFeatureData?.tokenId}`
+        const forSaleMessage = `<a href=${marketplaceLink} target="_blank">For sale at<i class="mana-icon"></i> ${salePrice}K <i class="JumpInIcon"></i></a>`;
+        const forRentMessage = `<a href=${marketplaceLink} target="_blank">For rent at<i class="mana-icon"></i> ${rentPrice}/day <i class="JumpInIcon"></i></a>`;
+        const forRentMessage2 = `<a href=${marketplaceLink} target="_blank">For rent at<i class="mana-icon"></i> ${rentPrice}/day</a>`;
+
+        salePriceDOM.innerHTML = saleRentFeatureData?.salePrice ? forSaleMessage : 'Not for sale';
+        if(saleRentFeatureData?.rentPrice && saleRentFeatureData?.salePrice) {
+          rentPriceDOM.innerHTML = forRentMessage2;
+        } else if (saleRentFeatureData?.rentPrice) {
+          rentPriceDOM.innerHTML = forRentMessage;
+        } else {
+          rentPriceDOM.innerHTML = 'Not for rent';
+        }
+      }
+
+      // Show Parcel Permalink Popup
+      function showPermalinkPopup() {
+        // hide social links & last updated date on mobile
+        if (!parcelLinkBox.classList.contains('show')) {
+          if(window.innerWidth < 630) {
+            socialLinks.classList.add('hide');
+            updateDate.classList.add('hide');
+            daoRecognition.classList.add('hide');
+            setTimeout(() => {
+            socialLinks.classList.add('remove');
+            updateDate.classList.add('remove');
+            daoRecognition.classList.add('remove');
+          }, 300);
+          }
+          parcelLinkBox.classList.remove("hide");
+          setTimeout(() => {
+            parcelLinkBox.classList.add("show");
+            parcelLinkBox.classList.add("bounce");
+            setTimeout(() => {
+              parcelLinkBox.classList.remove("bounce");
+            }, 800);
+          }, 1);
+        } else {
+          parcelLinkBox.classList.add("bounce");
+          setTimeout(() => {
+            parcelLinkBox.classList.remove("bounce");
+          }, 800);
+        }
+      }
+
+      // Hide Parcel Permalink Popup
+      function hidePermalinkPopup() {
+        removeLastPointer();
+        POItoolTipOverlay.setPosition(undefined);
+        POIpermalinkPopupExists = false;
+        parcelLinkBox.classList.remove("show");
+        setTimeout(() => {
+          parcelLinkBox.classList.add("hide");
+        }, 500);
+        socialLinks.classList.remove('remove');
+        updateDate.classList.remove('remove');
+        daoRecognition.classList.remove('remove');
+        setTimeout(() => {
+          socialLinks.classList.remove('hide');
+          updateDate.classList.remove('hide');
+          daoRecognition.classList.remove('hide');
+        }, 10);
+      }
+
+      // Copy Link to clipboard & show confiramtion popup
+      function copyLink() {
+        const shareLinkInput = document.getElementById('shareLink');
+        const popup = document.getElementById("copied-link-popup");
+        navigator.clipboard.writeText(shareLinkInput.value)
+        .then(() => {
+          console.log("successfully copied");
+          popup.classList.remove("hide");
+          popup.classList.add("show");
+          setTimeout(() => {
+            popup.classList.remove("show");
+            setTimeout(() => {
+            popup.classList.add("hide");
+            }, 500);
+          }, 1600);
+        })
+        .catch(() => {
+          console.log("unable to copy link");
+        });
+      }
+
+      // Set layer toggle active
+      function activateLayerToggle(layer) {
+        switch (layer) {
+          case 'nightMode':
+            nightModeToggle.checked = true;
+            break;
+          case 'estates':
+            estatesLayerToggle.checked = true;
+            break;
+          case 'recentChanges':
+            updatedLayerToggle.checked = true;
+            break;
+          case 'pois':
+            poisLayerToggle.checked = true;
+            break;
+          case 'sale':
+            saleLayerToggle.checked = true;
+            break;
+          case 'rent':
+            rentLayerToggle.checked = true;
+            break;
+          default:
+            console.error('Invalid layer parameter:', layer);
+            break;
+        }
+      }
+
+    </script>
+
+    <!-- Firestore SDK setup -->
+    <script type="module">
+      // Import the functions you need from the SDKs you need
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
+      // TODO: Add SDKs for Firebase products that you want to use
+      import { getFirestore, collection, getDocs, addDoc } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
+      
+      // Your web app's Firebase configuration
+      const firebaseConfig = {
+        apiKey: "AIzaSyCaj5svpLfMoMP57vE4hf5SoUrLfRAU2MY",
+        authDomain: "genesis-city-40d7e.firebaseapp.com",
+        projectId: "genesis-city-40d7e",
+        storageBucket: "genesis-city-40d7e.appspot.com",
+        messagingSenderId: "640487061617",
+        appId: "1:640487061617:web:1f63008062fe97866b43d0"
+      };
+      
+      // Initialize Firebase
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+
+      async function reportParcel(reportedParcel) {
+        const reportedParcelsRef = collection(db, "reportedParcels");
+        const reportedParcelCoords = reportedParcel.location.trim();
+        try {
+          await addDoc(reportedParcelsRef, reportedParcel);
+          Swal.fire({
+            grow: true,
+            icon: 'success',
+            title: `(${reportedParcelCoords})\nSuccessfully reported`,
+            background: 'rgba(18, 27, 34, 0.8)',
+            color: 'white',
+            toast: true,
+            position: 'center',
+            showConfirmButton: false,
+            timer: 2500,
+            timerProgressBar: true,
+            width: '300px',
+            didOpen: (toast) => {
+              toast.addEventListener('mouseenter', Swal.stopTimer)
+              toast.addEventListener('mouseleave', Swal.resumeTimer)
+            }
+          })
+          console.log(`Parcel with location: (${reportedParcelCoords}) successfully reported`);
+        } catch (error) {
+          console.error('Error reporting parcel:', error);
+        }
+      }
+      // Expose the reportParcel function to the global scope
+      window.reportParcel = reportParcel;
+    </script>
+  </body>
+</html>
